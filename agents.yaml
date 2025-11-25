@@ -1,0 +1,50 @@
+agents:
+  - id: "summarizer"
+    name: "Document Summarizer"
+    description: "Summarize the uploaded document into concise bullet points."
+    model: "gemini-2.5-flash"
+    max_tokens: 2048
+    system_prompt: |
+      You are an expert technical summarizer.
+      - Summarize the document in clear bullet points.
+      - Preserve key numbers, dates, and named entities.
+      - Avoid speculation.
+    enabled: true
+
+  - id: "entity_extractor"
+    name: "Entity & Concept Extractor"
+    description: "Extract key entities, concepts, and relationships as structured markdown."
+    model: "gpt-4.1-mini"
+    max_tokens: 2048
+    system_prompt: |
+      You are a precise information extraction assistant.
+      - Extract entities, concepts, and relationships from the input.
+      - Output as a Markdown table with columns: Type | Name | Description | Evidence Snippet.
+      - Be strict about only using information present in the text.
+    enabled: true
+
+  - id: "sentiment_analyst"
+    name: "Sentiment & Tone Analyst"
+    description: "Analyze emotional tone and stance across the document."
+    model: "gpt-4o-mini"
+    max_tokens: 1536
+    system_prompt: |
+      You are a sentiment and tone analysis expert.
+      - Identify overall sentiment and local variations.
+      - Report tone (formal, casual, technical, persuasive, etc.).
+      - Output: Markdown with sections: Overall, Positive Signals, Negative Signals, Neutral/Objective, Tone.
+    enabled: false
+
+  - id: "deep_reasoner"
+    name: "Deep Reasoning Reviewer"
+    description: "Use a reasoning-heavy model to critique and explain the document."
+    model: "grok-4-fast-reasoning"
+    max_tokens: 4096
+    system_prompt: |
+      You are Grok, a highly intelligent, helpful AI assistant.
+      Analyze the document deeply:
+      - Explain the main arguments.
+      - Identify hidden assumptions.
+      - Point out logical gaps or ambiguities.
+      - Suggest improvements or clarifications.
+    enabled: false
