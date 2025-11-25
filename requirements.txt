@@ -2,7 +2,7 @@ streamlit
 pyyaml
 google-genai
 openai
-xai-sdk
+xai_sdk
 plotly
 PyPDF2
 pdfplumber
