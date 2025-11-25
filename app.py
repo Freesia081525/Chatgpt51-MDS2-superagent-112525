@@ -13,6 +13,7 @@ import networkx as nx
 
 # LLM SDKs
 from google import genai  # pip install google-genai
+from google.genai import types as genai_types  # for Part / Image
 from openai import OpenAI  # pip install openai
 from xai_sdk import Client as XAIClient
 from xai_sdk.chat import user as grok_user, system as grok_system
@@ -84,7 +85,7 @@ def t(key: str, lang: str) -> str:
         "ocr_preview": {"en": "OCR text preview", "zh": "OCR 文字預覽"},
         "ocr_analysis": {"en": "OCR-based Summary & Entities", "zh": "OCR 摘要與實體分析"},
         "ocr_model": {"en": "Analysis model for OCR text", "zh": "OCR 文字分析模型"},
-        "ocr_analyze_btn": {"en": "Generate summary & 20 entities", "zh": "產生摘要與 20 個實體"},
+        "ocr_analyze_btn": {"en": "Generate summary & 20 entities", "zh": "產生摘要與 20 顆實體"},
         "ocr_summary": {"en": "OCR Summary (Markdown, keywords in coral)", "zh": "OCR 摘要（Markdown，關鍵字為珊瑚色）"},
         "ocr_entities_table": {"en": "20 Entities with Context", "zh": "20 個實體與其脈絡"},
         "ocr_word_graph": {"en": "Entity Word Graph", "zh": "實體關聯圖"},
@@ -374,7 +375,6 @@ def get_full_doc_text() -> str:
 with st.sidebar:
     st.markdown(f"### {t('settings', st.session_state.lang)}")
 
-    # Language
     lang_choice = st.radio(
         t("language", st.session_state.lang),
         options=["en", "zh"],
@@ -385,7 +385,6 @@ with st.sidebar:
     )
     st.session_state.lang = lang_choice
 
-    # Light/Dark
     mode = st.radio(
         t("light_mode", st.session_state.lang) + " / " + t("dark_mode", st.session_state.lang),
         options=["light", "dark"],
@@ -394,7 +393,6 @@ with st.sidebar:
     st.session_state.dark_mode = mode == "dark"
     current_theme = apply_theme(st.session_state.theme_id, st.session_state.dark_mode)
 
-    # Flower Luck Wheel
     st.markdown(f"### {t('theme_settings', st.session_state.lang)}")
     theme_labels = [f"{th['emoji']} {th['label']}" for th in FLOWER_THEMES]
     wheel_fig = go.Figure(
@@ -428,7 +426,6 @@ with st.sidebar:
         f"{current_theme_obj['emoji']} {current_theme_obj['label']}"
     )
 
-    # API KEYS
     st.markdown(f"### {t('api_keys', st.session_state.lang)}")
     if not st.session_state.api_keys["gemini"]:
         gemini_key = st.text_input("Gemini API Key", type="password")
@@ -483,14 +480,19 @@ def call_llm(
     user_prompt: str,
     max_tokens: int,
 ) -> Dict[str, Any]:
+    """
+    Unified LLM call across Gemini, OPENAAI/OpenAI, Grok.
+    Uses the correct google-genai `contents` format to avoid validation errors.
+    """
     lower = model.lower()
     if lower.startswith("gemini"):
         client = get_gemini_client()
-        prompt = f"{system_prompt}\n\n{user_prompt}"
+        prompt = f"{system_prompt.strip()}\n\n{user_prompt.strip()}"
+        # For text-only, `contents` can be a simple string or a list of strings.
         resp = client.models.generate_content(
             model=model,
-            contents=[{"role": "user", "parts": [prompt]}],
-            config={"max_output_tokens": max_tokens},
+            contents=[prompt],
+            generation_config={"max_output_tokens": max_tokens},
         )
         text = getattr(resp, "text", "") or ""
         return {"text": text, "usage_approx": len(prompt) + len(text)}
@@ -588,6 +590,10 @@ def ocr_pdf_pytesseract(pdf_bytes: bytes, page_numbers: List[int], dpi: int = 20
 
 
 def ocr_pdf_gemini(pdf_bytes: bytes, page_numbers: List[int], model: str = "gemini-2.5-flash") -> str:
+    """
+    OCR pages using Gemini multimodal.
+    Uses google-genai's Part.from_bytes and a simple [text, image_part] contents list.
+    """
     client = get_gemini_client()
     texts = []
     for p in page_numbers:
@@ -601,25 +607,17 @@ def ocr_pdf_gemini(pdf_bytes: bytes, page_numbers: List[int], model: str = "gemi
             buf = io.BytesIO()
             img.save(buf, format="JPEG")
             image_bytes = buf.getvalue()
+
+            image_part = genai_types.Part.from_bytes(image_bytes, mime_type="image/jpeg")
+
             resp = client.models.generate_content(
                 model=model,
                 contents=[
-                    {
-                        "role": "user",
-                        "parts": [
-                            {
-                                "text": "Transcribe all legible text from this page. "
-                                        "Return plain text only, no markdown or commentary."
-                            },
-                            {
-                                "inline_data": {
-                                    "mime_type": "image/jpeg",
-                                    "data": image_bytes,
-                                }
-                            },
-                        ],
-                    }
+                    "Transcribe all legible text from this page. "
+                    "Return plain text only, no markdown or commentary.",
+                    image_part,
                 ],
+                generation_config={"max_output_tokens": 2048},
             )
             text = getattr(resp, "text", "") or ""
             texts.append(f"[Page {p}]\n{text}")
@@ -681,10 +679,8 @@ OCR_TEXT:
     )
     text = result["text"]
 
-    # Extract JSON block
     match = re.search(r"```json(.*?)```", text, re.S | re.I)
     if not match:
-        # try fallback
         match = re.search(r"\{.*\}", text, re.S)
     if not match:
         raise ValueError("Could not find JSON block in model output.")
@@ -719,7 +715,6 @@ def build_word_graph(entities: List[Dict[str, Any]]) -> go.Figure:
 
     pos = nx.spring_layout(G, k=0.7, seed=42)
 
-    # Edges
     edge_x, edge_y = [], []
     for edge in G.edges():
         x0, y0 = pos[edge[0]]
@@ -735,7 +730,6 @@ def build_word_graph(entities: List[Dict[str, Any]]) -> go.Figure:
         mode="lines",
     )
 
-    # Nodes
     node_x, node_y, node_text = [], [], []
     for node in G.nodes():
         x, y = pos[node]
@@ -774,7 +768,6 @@ def build_word_graph(entities: List[Dict[str, Any]]) -> go.Figure:
 # ===============================
 st.markdown(f"## {t('app_title', st.session_state.lang)}")
 
-# Global task & advanced prompt
 col_gt, col_gp = st.columns([1, 1.2])
 with col_gt:
     st.markdown(f"#### {t('global_task', st.session_state.lang)}")
@@ -793,7 +786,6 @@ with col_gp:
         key="advanced_prompt",
     )
 
-# Tabs
 tab_doc, tab_agents, tab_dash = st.tabs(
     [t("tab_doc", st.session_state.lang), t("tab_agents", st.session_state.lang), t("tab_dash", st.session_state.lang)]
 )
@@ -814,7 +806,7 @@ with tab_doc:
         if ext == "pdf":
             st.session_state.pdf_bytes = uploaded.read()
             st.session_state.pdf_num_pages = load_pdf_metadata(st.session_state.pdf_bytes)
-            st.session_state.base_doc_text = ""  # base text will come from OCR or other extractions
+            st.session_state.base_doc_text = ""
         else:
             st.session_state.pdf_bytes = None
             st.session_state.pdf_num_pages = 0
@@ -828,14 +820,12 @@ with tab_doc:
             else:
                 st.session_state.base_doc_text = raw
 
-    # PDF-specific UI
     if st.session_state.pdf_bytes:
         st.markdown(f"#### PDF ({st.session_state.pdf_num_pages} pages)")
 
         col_pdf_left, col_pdf_right = st.columns([1.1, 1.3])
 
         with col_pdf_left:
-            # Page preview
             preview_page = st.slider(
                 "Preview page",
                 min_value=1,
@@ -875,7 +865,6 @@ with tab_doc:
             )
 
             if ocr_method == "llm_gemini":
-                ocr_llm_model = "gemini-2.5-flash"
                 st.markdown(
                     "<small>LLM OCR currently uses Gemini 2.5 Flash multimodal.</small>",
                     unsafe_allow_html=True,
@@ -894,10 +883,13 @@ with tab_doc:
                             elif ocr_method == "pytesseract_image":
                                 text = ocr_pdf_pytesseract(st.session_state.pdf_bytes, selected_pages)
                             elif ocr_method == "llm_gemini":
-                                text = ocr_pdf_gemini(st.session_state.pdf_bytes, selected_pages, model="gemini-2.5-flash")
+                                text = ocr_pdf_gemini(
+                                    st.session_state.pdf_bytes,
+                                    selected_pages,
+                                    model="gemini-2.5-flash",
+                                )
                             else:
                                 text = ""
-                            # Append to OCR text (so user can combine multiple runs)
                             if st.session_state.ocr_text:
                                 st.session_state.ocr_text += "\n\n" + text
                             else:
@@ -906,7 +898,6 @@ with tab_doc:
                         except Exception as e:
                             st.error(f"OCR error: {e}")
 
-    # Document preview (base + OCR)
     st.markdown(f"#### {t('document_preview', st.session_state.lang)}")
     full_doc = get_full_doc_text()
     if full_doc:
@@ -914,7 +905,6 @@ with tab_doc:
     else:
         st.info(t("no_doc", st.session_state.lang))
 
-    # Paste text
     st.markdown(f"**{t('paste_text', st.session_state.lang)}**")
     pasted = st.text_area(
         "",
@@ -929,7 +919,6 @@ with tab_doc:
         else:
             st.session_state.base_doc_text = pasted
 
-    # OCR analysis (summary + entities)
     if st.session_state.ocr_text:
         st.markdown("---")
         st.markdown(f"### {t('ocr_analysis', st.session_state.lang)}")
@@ -954,7 +943,6 @@ with tab_doc:
                     summary_md = data.get("summary_markdown", "")
                     entities = data.get("entities", [])
 
-                    # Highlight @@keyword@@ as coral span in HTML
                     def coralify(match):
                         word = match.group(1)
                         return f"<span style='color:coral; font-weight:600'>{word}</span>"
