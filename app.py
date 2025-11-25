@@ -481,54 +481,78 @@ def call_llm(
     max_tokens: int,
 ) -> Dict[str, Any]:
     """
-    Unified LLM call across Gemini, OPENAAI/OpenAI, Grok.
-    Uses the correct google-genai `contents` format to avoid validation errors.
+    Unified LLM call across Gemini, OPENAAI/OpenAI-style, and Grok.
+
+    - Gemini: uses google-genai Client, `contents=[prompt]`, `config={...}`.
+    - OPENAAI/OpenAI: uses openai.ChatCompletion-style API.
+    - Grok: uses xai_sdk chat.create(...).sample().
+
+    Returns:
+        {
+          "text": str,         # model response
+          "usage_approx": int  # approximate token/char usage
+        }
     """
     lower = model.lower()
+
+    # ---------- GEMINI ----------
     if lower.startswith("gemini"):
         client = get_gemini_client()
+
+        # Combine system + user into a single text prompt
         prompt = f"{system_prompt.strip()}\n\n{user_prompt.strip()}"
-        # For text-only, `contents` can be a simple string or a list of strings.
+
+        # For text-only calls, contents can be a list of strings
         resp = client.models.generate_content(
             model=model,
             contents=[prompt],
-            generation_config={"max_output_tokens": max_tokens},
+            config={"max_output_tokens": max_tokens},
         )
-        text = getattr(resp, "text", "") or ""
-        return {"text": text, "usage_approx": len(prompt) + len(text)}
 
-    elif lower.startswith("gpt-"):
+        text = getattr(resp, "text", "") or ""
+        usage_approx = len(prompt) + len(text)
+        return {"text": text, "usage_approx": usage_approx}
+
+    # ---------- OPENAAI / OPENAI (gpt-*) ----------
+    if lower.startswith("gpt-"):
         client = get_openai_client()
+
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ]
+
         resp = client.chat.completions.create(
             model=model,
             messages=messages,
             max_tokens=max_tokens,
         )
+
         text = resp.choices[0].message.content
         usage_obj = getattr(resp, "usage", None)
-        if usage_obj:
+        if usage_obj is not None and hasattr(usage_obj, "total_tokens"):
             usage_approx = usage_obj.total_tokens
         else:
             usage_approx = len(system_prompt) + len(user_prompt) + len(text)
+
         return {"text": text, "usage_approx": usage_approx}
 
-    elif lower.startswith("grok-"):
+    # ---------- GROK (grok-*) ----------
+    if lower.startswith("grok-"):
         client = get_grok_client()
+
         chat = client.chat.create(model=model)
         chat.append(grok_system(system_prompt))
         chat.append(grok_user(user_prompt))
+
         resp = chat.sample()
         text = str(resp.content)
         usage_approx = len(system_prompt) + len(user_prompt) + len(text)
+
         return {"text": text, "usage_approx": usage_approx}
 
-    else:
-        raise ValueError(f"Unsupported model: {model}")
-
+    # ---------- UNSUPPORTED ----------
+    raise ValueError(f"Unsupported model: {model}")
 
 # ===============================
 # PDF HELPERS
@@ -589,27 +613,44 @@ def ocr_pdf_pytesseract(pdf_bytes: bytes, page_numbers: List[int], dpi: int = 20
     return "\n\n".join(texts)
 
 
-def ocr_pdf_gemini(pdf_bytes: bytes, page_numbers: List[int], model: str = "gemini-2.5-flash") -> str:
+def ocr_pdf_gemini(
+    pdf_bytes: bytes,
+    page_numbers: List[int],
+    model: str = "gemini-2.5-flash",
+) -> str:
     """
-    OCR pages using Gemini multimodal.
-    Uses google-genai's Part.from_bytes and a simple [text, image_part] contents list.
+    OCR the specified PDF pages using Gemini multimodal (vision-text).
+
+    - Converts each requested page to a JPEG with pdf2image.
+    - Wraps bytes in a google-genai Part.
+    - Calls generate_content with [instruction_text, image_part].
+    - Returns concatenated plain text with [Page N] markers.
     """
     client = get_gemini_client()
-    texts = []
+    texts: List[str] = []
+
     for p in page_numbers:
+        # Convert only the selected page
         images = convert_from_bytes(
             pdf_bytes,
             first_page=p,
             last_page=p,
             dpi=200,
         )
+
         for img in images:
+            # Encode page as JPEG bytes
             buf = io.BytesIO()
             img.save(buf, format="JPEG")
             image_bytes = buf.getvalue()
 
-            image_part = genai_types.Part.from_bytes(image_bytes, mime_type="image/jpeg")
+            # Wrap as Part for google-genai
+            image_part = genai_types.Part.from_bytes(
+                image_bytes,
+                mime_type="image/jpeg",
+            )
 
+            # Instruction + image as contents list
             resp = client.models.generate_content(
                 model=model,
                 contents=[
@@ -617,10 +658,12 @@ def ocr_pdf_gemini(pdf_bytes: bytes, page_numbers: List[int], model: str = "gemi
                     "Return plain text only, no markdown or commentary.",
                     image_part,
                 ],
-                generation_config={"max_output_tokens": 2048},
+                config={"max_output_tokens": 2048},
             )
-            text = getattr(resp, "text", "") or ""
-            texts.append(f"[Page {p}]\n{text}")
+
+            page_text = getattr(resp, "text", "") or ""
+            texts.append(f"[Page {p}]\n{page_text}")
+
     return "\n\n".join(texts)
 
 
