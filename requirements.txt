@@ -1,0 +1,13 @@
+streamlit
+pyyaml
+google-genai
+openai
+xai_sdk
+plotly
+PyPDF2
+pdfplumber
+pytesseract
+pdf2image
+Pillow
+networkx
+pandas
