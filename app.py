@@ -621,67 +621,115 @@ def ocr_pdf_gemini(
     """
     OCR the specified PDF pages using gpt-4o-mini vision via the OPENAAI/OpenAI-style client.
 
-    - Converts each requested page to a JPEG with pdf2image.
-    - Encodes JPEG as base64 and sends as an image_url in chat.completions.
-    - Returns concatenated plain text with [Page N] markers.
+    Improvements vs previous version:
+    - Batches multiple pages per API call (default: up to 4 pages per request)
+      to reduce overhead and improve throughput.
+    - Gives strict instructions to emit [Page N] headers for each page so the
+      concatenated output remains structured and unambiguous.
 
-    NOTE: The `model` argument from callers is ignored in favor of 'gpt-4o-mini'
-    to avoid changing call sites; this function always uses gpt-4o-mini.
+    Returns:
+        A single string containing all pages in order, e.g.:
+
+        [Page 1]
+        ...transcribed text...
+
+        [Page 2]
+        ...transcribed text...
+
+        ...
     """
-    client = get_openai_client()
-    vision_model = "gpt-4o-mini"  # force use of gpt-4o-mini for OCR
+    if not page_numbers:
+        return ""
 
+    client = get_openai_client()
+    vision_model = "gpt-4o-mini"  # force vision model for OCR; ignore incoming `model` arg
+
+    # Normalize and sort page numbers
+    unique_pages = sorted(set(page_numbers))
     texts: List[str] = []
 
-    for p in page_numbers:
-        # Convert the selected page to image(s)
-        images = convert_from_bytes(
-            pdf_bytes,
-            first_page=p,
-            last_page=p,
-            dpi=200,
-        )
+    # Tune this for efficiency vs risk of truncation
+    batch_size = 4  # pages per LLM call
 
-        for img in images:
-            # Encode page as JPEG bytes and then base64
+    import base64  # safe if re-imported
+
+    for i in range(0, len(unique_pages), batch_size):
+        batch = unique_pages[i : i + batch_size]
+        if not batch:
+            continue
+
+        images_content = []
+
+        # Convert each page in this batch to a JPEG and build image parts
+        for p in batch:
+            images = convert_from_bytes(
+                pdf_bytes,
+                first_page=p,
+                last_page=p,
+                dpi=200,
+            )
+            if not images:
+                continue
+
+            img = images[0]
             buf = io.BytesIO()
             img.save(buf, format="JPEG")
             image_bytes = buf.getvalue()
 
-            import base64  # already imported at top of app, but safe if repeated
             image_b64 = base64.b64encode(image_bytes).decode("utf-8")
             data_url = f"data:image/jpeg;base64,{image_b64}"
 
-            # Chat with image using OpenAI/OPENAAI-style vision format
-            messages = [
+            images_content.append(
                 {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": (
-                                "Transcribe all legible text from this page. "
-                                "Return plain text only, no markdown or commentary."
-                            ),
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": data_url},
-                        },
-                    ],
+                    "type": "image_url",
+                    "image_url": {"url": data_url},
                 }
-            ]
-
-            resp = client.chat.completions.create(
-                model=vision_model,
-                messages=messages,
-                max_tokens=10048,
             )
 
-            page_text = resp.choices[0].message.content or ""
-            texts.append(f"[Page {p}]\n{page_text}")
+        if not images_content:
+            continue
+
+        # Clear, strict instructions for multi-page transcription
+        instruction = (
+            "You will receive one or more page images from a PDF document.\n"
+            f"The pages are provided in this exact order: {', '.join(str(p) for p in batch)}.\n\n"
+            "For EACH page N, in order, transcribe ALL legible text.\n"
+            "For every page N, output EXACTLY this header line:\n"
+            "[Page N]\n"
+            "Then, on the following lines, output the full transcription for that page.\n\n"
+            "Important formatting rules:\n"
+            "- Use plain text only (no markdown, no bullet points, no extra commentary).\n"
+            "- Do NOT merge multiple pages together; keep content for each page under its own [Page N] header.\n"
+            "- Preserve line breaks where they meaningfully separate paragraphs or list items.\n"
+        )
+
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": instruction},
+                    *images_content,
+                ],
+            }
+        ]
+
+        # Scale max_tokens with number of pages, with a safe upper bound
+        # Adjust if your pages are very dense or very sparse.
+        per_page_tokens = 8200
+        max_tokens = min(10096, per_page_tokens * len(batch))
+
+        resp = client.chat.completions.create(
+            model=vision_model,
+            messages=messages,
+            max_tokens=max_tokens,
+        )
+
+        batch_text = (resp.choices[0].message.content or "").strip()
+        if batch_text:
+            texts.append(batch_text)
 
     return "\n\n".join(texts)
+
 # ===============================
 # OCR ANALYSIS (SUMMARY + ENTITIES + WORD GRAPH)
 # ===============================
