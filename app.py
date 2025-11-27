@@ -616,17 +616,21 @@ def ocr_pdf_pytesseract(pdf_bytes: bytes, page_numbers: List[int], dpi: int = 20
 def ocr_pdf_gemini(
     pdf_bytes: bytes,
     page_numbers: List[int],
-    model: str = "gemini-2.5-flash",
+    model: str = "gpt-4o-mini",
 ) -> str:
     """
-    OCR the specified PDF pages using Gemini multimodal (vision-text).
+    OCR the specified PDF pages using gpt-4o-mini vision via the OPENAAI/OpenAI-style client.
 
     - Converts each requested page to a JPEG with pdf2image.
-    - Wraps bytes in a google-genai Part via keyword-only args.
-    - Calls generate_content with [instruction_text, image_part].
+    - Encodes JPEG as base64 and sends as an image_url in chat.completions.
     - Returns concatenated plain text with [Page N] markers.
+
+    NOTE: The `model` argument from callers is ignored in favor of 'gpt-4o-mini'
+    to avoid changing call sites; this function always uses gpt-4o-mini.
     """
-    client = get_gemini_client()
+    client = get_openai_client()
+    vision_model = "gpt-4o-mini"  # force use of gpt-4o-mini for OCR
+
     texts: List[str] = []
 
     for p in page_numbers:
@@ -639,33 +643,45 @@ def ocr_pdf_gemini(
         )
 
         for img in images:
-            # Encode page as JPEG bytes
+            # Encode page as JPEG bytes and then base64
             buf = io.BytesIO()
             img.save(buf, format="JPEG")
             image_bytes = buf.getvalue()
 
-            # NOTE: Part.from_bytes uses keyword-only arguments in newer google-genai
-            image_part = genai_types.Part.from_bytes(
-                data=image_bytes,
-                mime_type="image/jpeg",
+            import base64  # already imported at top of app, but safe if repeated
+            image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+            data_url = f"data:image/jpeg;base64,{image_b64}"
+
+            # Chat with image using OpenAI/OPENAAI-style vision format
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "Transcribe all legible text from this page. "
+                                "Return plain text only, no markdown or commentary."
+                            ),
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": data_url},
+                        },
+                    ],
+                }
+            ]
+
+            resp = client.chat.completions.create(
+                model=vision_model,
+                messages=messages,
+                max_tokens=2048,
             )
 
-            # Instruction + image as contents list
-            resp = client.models.generate_content(
-                model=model,
-                contents=[
-                    "Transcribe all legible text from this page. "
-                    "Return plain text only, no markdown or commentary.",
-                    image_part,
-                ],
-                config={"max_output_tokens": 12048},
-            )
-
-            page_text = getattr(resp, "text", "") or ""
+            page_text = resp.choices[0].message.content or ""
             texts.append(f"[Page {p}]\n{page_text}")
 
     return "\n\n".join(texts)
-
 # ===============================
 # OCR ANALYSIS (SUMMARY + ENTITIES + WORD GRAPH)
 # ===============================
