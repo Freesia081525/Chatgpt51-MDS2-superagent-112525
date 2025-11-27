@@ -622,7 +622,7 @@ def ocr_pdf_gemini(
     OCR the specified PDF pages using Gemini multimodal (vision-text).
 
     - Converts each requested page to a JPEG with pdf2image.
-    - Wraps bytes in a google-genai Part.
+    - Wraps bytes in a google-genai Part via keyword-only args.
     - Calls generate_content with [instruction_text, image_part].
     - Returns concatenated plain text with [Page N] markers.
     """
@@ -630,7 +630,7 @@ def ocr_pdf_gemini(
     texts: List[str] = []
 
     for p in page_numbers:
-        # Convert only the selected page
+        # Convert the selected page to image(s)
         images = convert_from_bytes(
             pdf_bytes,
             first_page=p,
@@ -644,9 +644,9 @@ def ocr_pdf_gemini(
             img.save(buf, format="JPEG")
             image_bytes = buf.getvalue()
 
-            # Wrap as Part for google-genai
+            # NOTE: Part.from_bytes uses keyword-only arguments in newer google-genai
             image_part = genai_types.Part.from_bytes(
-                image_bytes,
+                data=image_bytes,
                 mime_type="image/jpeg",
             )
 
@@ -658,14 +658,13 @@ def ocr_pdf_gemini(
                     "Return plain text only, no markdown or commentary.",
                     image_part,
                 ],
-                config={"max_output_tokens": 2048},
+                config={"max_output_tokens": 12048},
             )
 
             page_text = getattr(resp, "text", "") or ""
             texts.append(f"[Page {p}]\n{page_text}")
 
     return "\n\n".join(texts)
-
 
 # ===============================
 # OCR ANALYSIS (SUMMARY + ENTITIES + WORD GRAPH)
