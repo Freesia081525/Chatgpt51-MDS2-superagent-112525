@@ -675,7 +675,7 @@ def ocr_pdf_gemini(
             resp = client.chat.completions.create(
                 model=vision_model,
                 messages=messages,
-                max_tokens=2048,
+                max_tokens=10048,
             )
 
             page_text = resp.choices[0].message.content or ""
